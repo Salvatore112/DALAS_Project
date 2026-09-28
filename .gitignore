@@ -1,0 +1,8 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Generated merged data
+big_merged_dataset.csv
