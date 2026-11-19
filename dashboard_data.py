@@ -121,7 +121,7 @@ def filter_libraries(frame, regions=None, departments=None, search='', collectio
 
 
 def collection_summary(frame, metric):
-    return (frame.groupby('band', observed=False)[metric].agg(['median', 'count'])
+    return (frame.groupby('band', observed=False)[metric].agg(['median', 'mean', 'count'])
             .reindex(BANDS).reset_index())
 
 

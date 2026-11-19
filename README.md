@@ -63,7 +63,7 @@ The upstream merge groups sources by postal code and takes the first non-null va
 - **Income and rent:** matched separately by the source income/rent commune code to the library's home code. A neighbour's postal-code-linked value is not assigned. Unmatched values remain missing.
 - **Income indicator:** `income_[DEC] Méd`, the declared-income median indicator. The merged file does not establish its exact statistical unit or vintage; consult the original source before a substantive income interpretation.
 - **Rent:** `rent_loypredm2`, predicted rent in €/m². Decimal commas are converted to numbers. No affordability ratio is inferred.
-- **Missingness:** missing, invalid, non-finite, and negative count values are excluded; valid zero counts are retained. No mean imputation is used. Missing libraries or unreported activity do not imply absent access or zero use.
+- **Missingness:** missing, invalid, non-finite, and negative count values are excluded; valid zero counts are retained. Mean imputation is used only in the optional PCA projection; the other charts retain missingness. Missing libraries or unreported activity do not imply absent access or zero use.
 - **Collection chart:** median activity by six explicit book-count bands, using libraries with both fields. Hover shows the reporting sample size.
 - **Map:** counts use a log(1 + value) colour scale with raw-count labels; income and rent use linear scales. Scales remain fixed across filters. Grey points lack the selected measure. Coordinates outside valid ranges and (0, 0) are excluded.
 - **Scatter plot:** shows all available pairs, with no sampling. Log axes exclude zero values and disclose the count; linear axes include them.
@@ -74,3 +74,14 @@ The upstream merge groups sources by postal code and takes the first non-null va
 The file does not retain a consistent observation year, so the dashboard does not invent a time series. Library use is an exploratory proxy, not a direct measure of individual reading habits, and correlations do not establish causes. Bookshop and population-history fields remain available in the original dataset but are outside this focused dashboard.
 
 The visualization APIs follow the official [Dash documentation](https://dash.plotly.com/) and [Plotly map documentation](https://plotly.com/python/tile-maps/).
+
+## Original exploration views
+
+The dashboard combines the original team’s exploration controls with the newer map, regional comparisons, and coverage charts:
+
+- **Scatter plots:** both axes can independently select books, loans, borrowers, visits, seats, computers, population, density, income, or rent. “Selected activity” keeps the Y-axis linked to the global activity selector. Linear and logarithmic scales remain available.
+- **Book-count slider:** the Collection explorer moves through every actual book count in the filtered sample, with step 1 in the sorted list. Exact count preserves the original interaction; “Up to this count” offers a broader comparison. The slider resets to the middle available count after filtering. Empty and single-count selections disable it appropriately. Bubble area follows commune population with a minimum visible size; missing population uses small markers, and unmatched income uses grey. Counts of omitted values are shown. Both axes are linear to retain zero values.
+- **Mean-activity histogram:** the collection chart now offers the original average-activity approach alongside the median, using explicit, readable collection bands. The plot and axis labels follow the selected statistic.
+- **PCA:** an expandable panel restores the two-component projection. It uses seven named resource/activity/context measures, log(1 + value), transformed-mean imputation, and standardisation, excluding constant inputs. A NumPy SVD computes the same principal-component projection without another installation dependency. The model is fitted once to the full library sample so filtering never changes the coordinate system. Axes show explained variance, hover identifies imputation, and this view is optional rather than the dashboard’s main interpretation.
+
+All restored point plots link to the existing library detail panel. The shared filters apply throughout. Identifiers and raw geographic coordinates are excluded from numerical comparison choices.

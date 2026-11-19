@@ -6,3 +6,28 @@ ENV/
 
 # Generated merged data
 big_merged_dataset.csv
+
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local editor and notebook state
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Build and temporary output
+build/
+dist/
+*.egg-info/
+*.tmp
+*.temp
+*.swp
+*~

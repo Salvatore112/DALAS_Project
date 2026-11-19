@@ -108,6 +108,46 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(regional.layout.annotations), 1)
         self.assertEqual(len(coverage.layout.annotations), 1)
 
+    def test_restored_scatter_supports_independent_axes(self):
+        figure, note = dashboard.update_comparison(None, 'income', 'loans', 'linear', 'rent')
+        expected = dashboard.LIBRARIES.dropna(subset=['income', 'rent'])
+        self.assertEqual(len(figure.data[0].x), len(expected))
+        self.assertEqual(figure.layout.yaxis.title.text, data.LABELS['rent'])
+
+    def test_slider_exact_and_cumulative_selection_preserve_counts(self):
+        frame = dashboard.LIBRARIES
+        counts = dashboard.book_counts(frame)
+        index = len(counts) // 2
+        for mode in ['exact', 'upto']:
+            figure, label, note = dashboard.slider_figure(frame, index, mode, 'visits')
+            chosen = frame[frame.books.eq(counts[index]) if mode == 'exact' else frame.books.le(counts[index])]
+            expected = chosen.dropna(subset=['visits'])
+            self.assertEqual(sum(len(trace.x) for trace in figure.data), len(expected))
+            actual = {row[0] for trace in figure.data for row in trace.customdata}
+            self.assertEqual(actual, set(expected.id))
+
+    def test_slider_handles_missing_counts_single_count_and_zero(self):
+        self.assertTrue(dashboard.update_slider_options([])[3])
+        zero = dashboard.LIBRARIES[dashboard.LIBRARIES.books.eq(0)]
+        self.assertTrue(dashboard.update_slider_options(zero.index.tolist())[3])
+        figure, label, note = dashboard.slider_figure(zero, 9999, 'exact', 'loans')
+        self.assertEqual(label, 'Exactly 0 books')
+        self.assertEqual(sum(len(trace.x) for trace in figure.data), zero.loans.notna().sum())
+        figure, label, note = dashboard.slider_figure(zero.iloc[:0], 0, 'exact', 'loans')
+        self.assertEqual(len(figure.layout.annotations), 1)
+
+    def test_original_mean_summary_and_pca_are_available(self):
+        frame = dashboard.LIBRARIES
+        figure = dashboard.band_figure(frame, 'loans', 'mean')
+        expected = frame.groupby('band', observed=False).loans.mean().reindex(data.BANDS)
+        np.testing.assert_allclose(figure.data[0].x, expected, equal_nan=True)
+        scores, explained, columns = dashboard.pca_model()
+        self.assertTrue(np.isfinite(scores[['PC1', 'PC2']]).all().all())
+        self.assertTrue(0 < sum(explained) <= 100)
+        figure, note = dashboard.pca_figure(frame.iloc[:10])
+        np.testing.assert_allclose(figure.data[0].x, scores.loc[frame.index[:10], 'PC1'])
+        self.assertEqual(len(dashboard.update_pca([], True)[0].layout.annotations), 1)
+
     def test_actual_dataset_has_unique_library_ids(self):
         self.assertEqual(len(dashboard.LIBRARIES), 5232)
         self.assertTrue(dashboard.LIBRARIES.id.is_unique)
@@ -161,7 +201,8 @@ class DashboardTests(unittest.TestCase):
             'output': key,
             'outputs': [{'id': output.component_id, 'property': output.component_property} for output in outputs],
             'inputs': [{'id': 'filtered-ids', 'property': 'data', 'value': [0, 1]},
-                       {'id': 'metric', 'property': 'value', 'value': 'loans'}],
+                       {'id': 'metric', 'property': 'value', 'value': 'loans'},
+                       {'id': 'collection-statistic', 'property': 'value', 'value': 'median'}],
             'state': [], 'changedPropIds': ['filtered-ids.data'],
         })
         self.assertEqual(response.status_code, 200)

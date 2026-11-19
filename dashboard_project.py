@@ -1,4 +1,5 @@
 import argparse
+from functools import lru_cache
 from pathlib import Path
 from textwrap import wrap
 
@@ -14,6 +15,7 @@ from dashboard_data import (
 )
 
 LIBRARIES, DATASET = load_data()
+MEASURES = ['books', 'loans', 'borrowers', 'visits', 'seats', 'computers', 'population', 'density', 'income', 'rent']
 TEAL = '#17695b'
 INK = '#203b36'
 MUTED = '#73827c'
@@ -103,24 +105,26 @@ def map_figure(frame, color, extent, basemap):
     return fig, note
 
 
-def band_figure(frame, metric):
+def band_figure(frame, metric, statistic='median'):
     summary = collection_summary(frame, metric)
+    summary['value'] = summary[statistic]
+    label = 'Mean' if statistic == 'mean' else 'Median'
     available = summary[summary['count'] > 0]
     if available.empty:
         return empty_figure('No reported activity and collection pairs.', 310)
     fig = go.Figure(go.Bar(
-        x=summary['median'], y=BANDS, orientation='h',
+        x=summary['value'], y=BANDS, orientation='h',
         marker={'color': ['#d8e7de', '#bdd7c8', '#94bda9', '#6b9e89', '#397a65', TEAL],
                 'cornerradius': 4},
         customdata=summary[['count']].values,
-        hovertemplate='%{y} books<br>Median ' + metric + ': %{x:,.0f}<br>%{customdata[0]:,} reporting libraries<extra></extra>',
-        text=[number(v) if n else 'No data' for v, n in zip(summary['median'], summary['count'])],
+        hovertemplate='%{y} books<br>' + label + ' ' + metric + ': %{x:,.0f}<br>%{customdata[0]:,} reporting libraries<extra></extra>',
+        text=[number(v) if n else 'No data' for v, n in zip(summary['value'], summary['count'])],
         textposition='outside', cliponaxis=False,
     ))
     figure_base(fig, 310)
     fig.update_layout(margin={'l': 76, 'r': 68, 't': 10, 'b': 46}, bargap=.4)
     fig.update_yaxes(autorange='reversed', showgrid=False, title=None)
-    fig.update_xaxes(title=f'Median {metric}', rangemode='tozero')
+    fig.update_xaxes(title=f'{label} {metric}', rangemode='tozero')
     return fig
 
 
@@ -234,10 +238,94 @@ def coverage_figure(frame):
     return fig
 
 
+def book_counts(frame):
+    return np.sort(frame.books.dropna().unique())
+
+
+def slider_figure(frame, index, mode, metric):
+    counts = book_counts(frame)
+    if not len(counts):
+        return empty_figure('No reported book counts in this selection.', 350), 'No book counts available', 'Broaden the filters to explore collections.'
+    count = counts[min(max(int(index or 0), 0), len(counts) - 1)]
+    selected = frame[frame.books.eq(count) if mode == 'exact' else frame.books.le(count)]
+    pairs = selected.dropna(subset=[metric])
+    label = f"{'Exactly' if mode == 'exact' else 'Up to'} {number(count)} books"
+    note = f'{len(pairs):,} libraries plotted · {len(selected) - len(pairs):,} missing {metric} values · {frame.books.isna().sum():,} missing book counts'
+    if pairs.empty:
+        return empty_figure('No reported activity for this book count.<br>Try another count or “Up to this count”.', 350), label, note
+    fig = go.Figure()
+    max_population = max(float(LIBRARIES.population.max()), 1)
+    for known in [False, True]:
+        group = pairs[pairs.income.notna() if known else pairs.income.isna()]
+        if group.empty:
+            continue
+        sizes = np.maximum(7, 48 * np.sqrt(group.population.fillna(0).to_numpy() / max_population))
+        marker = {'size': sizes, 'opacity': .75, 'line': {'width': 1, 'color': '#fff'}, 'color': '#aeb7b2'}
+        if known:
+            marker.update(color=group.income, colorscale=COLORS, cmin=0, cmax=LIBRARIES.income.max(),
+                          colorbar={'title': {'text': 'Income (€)', 'font': {'size': 10}}, 'thickness': 8, 'len': .7})
+        hover = group[['id', 'name', 'city']].copy()
+        hover['population_label'] = group.population.map(number)
+        hover['income_label'] = group.income.map(number)
+        fig.add_trace(go.Scattergl(
+            x=group.books, y=group[metric], mode='markers', marker=marker,
+            customdata=hover.to_numpy(),
+            hovertemplate='<b>%{customdata[1]}</b><br>%{customdata[2]}<br>Books: %{x:,.0f}<br>'
+                          + LABELS[metric] + ': %{y:,.0f}<br>Population: %{customdata[3]}<br>Income: %{customdata[4]}<extra></extra>',
+        ))
+    figure_base(fig, 350)
+    fig.update_layout(showlegend=False)
+    fig.update_xaxes(title='Books', rangemode='tozero')
+    fig.update_yaxes(title=LABELS[metric], rangemode='tozero')
+    if mode == 'exact':
+        padding = max(count * .05, 1)
+        fig.update_xaxes(range=[max(0, count - padding), count + padding])
+    note += f' · {pairs.income.isna().sum():,} grey points: income unmatched · {pairs.population.isna().sum():,} population values missing (small markers)'
+    note += ' · Marker area follows population, with a minimum size for visibility; zero values are retained.'
+    return fig, label, note
+
+
+@lru_cache(maxsize=1)
+def pca_model():
+    columns = ['books', 'loans', 'borrowers', 'visits', 'seats', 'computers', 'population']
+    values = LIBRARIES[columns].dropna(how='all')
+    logged = np.log1p(values)
+    missing = logged.isna().sum(axis=1)
+    filled = logged.fillna(logged.mean())
+    deviation = filled.std(ddof=0)
+    filled = filled.loc[:, deviation.gt(0)]
+    standardized = (filled - filled.mean()) / deviation[deviation.gt(0)]
+    u, singular, components = np.linalg.svd(standardized.to_numpy(), full_matrices=False)
+    scores = pd.DataFrame(u[:, :2] * singular[:2], index=values.index, columns=['PC1', 'PC2'])
+    scores['imputed'] = missing
+    explained = singular[:2] ** 2 / np.sum(singular ** 2) * 100
+    return scores, explained, filled.columns.tolist()
+
+
+def pca_figure(frame):
+    scores, explained, columns = pca_model()
+    selected = frame.join(scores, how='inner')
+    if selected.empty:
+        return empty_figure('No libraries available for the projection.', 350), 'Broaden the filters to explore the projection.'
+    fig = go.Figure(go.Scattergl(
+        x=selected.PC1, y=selected.PC2, mode='markers',
+        marker={'size': 6, 'color': TEAL, 'opacity': .5},
+        customdata=selected[['id', 'name', 'city', 'imputed']].to_numpy(),
+        hovertemplate='<b>%{customdata[1]}</b><br>%{customdata[2]}<br>PC1: %{x:.2f}<br>PC2: %{y:.2f}<br>%{customdata[3]} imputed measures<extra></extra>',
+    ))
+    figure_base(fig, 350)
+    fig.update_xaxes(title=f'PC1 · {explained[0]:.1f}% of variance')
+    fig.update_yaxes(title=f'PC2 · {explained[1]:.1f}% of variance')
+    note = f'{len(selected):,} libraries · {int(selected.imputed.gt(0).sum()):,} with at least one imputed measure. '
+    note += 'Inputs: ' + ', '.join(LABELS[column].lower() for column in columns) + '. '
+    note += 'Counts use log(1 + value), missing entries use the full-sample transformed mean, and inputs are standardised. The model is fitted once on all libraries; filters select points without changing the axes. Imputation is used only in this optional PCA view.'
+    return fig, note
+
+
 def graph(graph_id, **kwargs):
     heights = {'library-map': 430, 'collection-chart': 310,
                'comparison-chart': 350, 'correlation-chart': 350,
-               'regional-chart': 360, 'coverage-chart': 360}
+               'regional-chart': 360, 'coverage-chart': 360, 'slider-chart': 350, 'pca-chart': 350}
     return dcc.Graph(id=graph_id, config=GRAPH_CONFIG, responsive=True,
                      style={'height': heights[graph_id], 'width': '100%'}, **kwargs)
 
@@ -285,7 +373,7 @@ app.layout = html.Div([
     dcc.Store(id='filtered-ids'), dcc.Store(id='detail-scroll'), dcc.Download(id='download-data'),
     html.A('Skip to dashboard', href='#atlas', className='skip-link'),
     html.Header([
-        html.Nav([html.A('Atlas', href='#atlas'), html.A('Relationships', href='#relationships'), html.A('Data & methods', href='#data')], **{'aria-label': 'Page sections'}),
+        html.Nav([html.A('Atlas', href='#atlas'), html.A('Relationships', href='#relationships'), html.A('Collection explorer', href='#collection-explorer'), html.A('Data & methods', href='#data')], **{'aria-label': 'Page sections'}),
         html.Span('DALAS / DATA EXPLORATION', className='header-tag'),
     ], className='topbar'),
     html.Div([
@@ -343,9 +431,10 @@ app.layout = html.Div([
                 ], className='panel map-panel'),
                 html.Section([
                     card_title('02 / COLLECTIONS & USE', 'From shelves to activity', 'How does typical activity vary with collection size?'),
+                    html.Div(field('Summary statistic', dcc.RadioItems(id='collection-statistic', options=[{'label': 'Median', 'value': 'median'}, {'label': 'Mean (original view)', 'value': 'mean'}], value='median', inline=True, className='map-toggle')), className='chart-controls'),
                     graph('collection-chart'),
-                    html.P('Collection bands in books. Bars show the median among libraries reporting both measures; hover for sample sizes.', className='chart-note'),
-                    html.Div([html.Span('READING THE CHART', className='eyebrow'), html.P('Medians keep a few very large libraries from dominating the comparison.')], className='insight-note'),
+                    html.P('Collection bands in books. Bars show the selected summary among libraries reporting both measures; hover for sample sizes.', className='chart-note'),
+                    html.Div([html.Span('READING THE CHART', className='eyebrow'), html.P('Median limits the influence of very large libraries. Mean restores the original average-activity comparison.')], className='insight-note'),
                 ], className='panel collection-panel'),
             ], className='atlas-grid'), type='circle', color=TEAL, delay_show=250),
             html.Section(id='library-detail', children=detail_panel(), className='detail-panel', **{'aria-live': 'polite'}),
@@ -355,7 +444,8 @@ app.layout = html.Div([
                 dcc.Loading(html.Div([
                     html.Section([
                         card_title('03 / COMPARE LIBRARIES', 'Resources, context & activity'),
-                        html.Div([field('Compare activity with', dcc.Dropdown(id='compare-x', options=[{'label': LABELS[c], 'value': c} for c in ['books', 'population', 'income', 'rent']], value='books', clearable=False)),
+                        html.Div([field('X-axis', dcc.Dropdown(id='compare-x', options=[{'label': LABELS[c], 'value': c} for c in MEASURES], value='books', clearable=False)),
+                                  field('Y-axis', dcc.Dropdown(id='compare-y', options=[{'label': 'Selected activity', 'value': 'activity'}] + [{'label': LABELS[c], 'value': c} for c in MEASURES], value='activity', clearable=False)),
                                   field('Axis scale', dcc.Dropdown(id='axis-scale', options=[{'label': 'Logarithmic', 'value': 'log'}, {'label': 'Linear', 'value': 'linear'}], value='log', clearable=False))], className='comparison-controls'),
                         graph('comparison-chart'), html.P(id='comparison-note', className='chart-note'),
                         html.P('Log axes make small and large libraries readable together. Switch to linear to include zero values.', className='chart-note secondary-note'),
@@ -379,6 +469,24 @@ app.layout = html.Div([
                     ], className='panel'),
                 ], className='relationships-grid'), type='circle', color=TEAL, delay_show=250),
             ], id='relationships'),
+            html.Section([
+                html.Div([html.Div([html.Span('INTERACTIVE EXPLORATION', className='eyebrow'), html.H2('Explore collection sizes')]),
+                          html.P('The original book-count slider, with the same shared filters.')], className='section-heading'),
+                html.Section([
+                    card_title('07 / COLLECTION EXPLORER', 'Compare libraries at a chosen book count', 'Move through actual reported book counts; bubble size shows commune population and colour shows income.'),
+                    html.Div([
+                        field('Selection mode', dcc.RadioItems(id='slider-mode', options=[{'label': 'Exact count (original view)', 'value': 'exact'}, {'label': 'Up to this count', 'value': 'upto'}], value='exact', inline=True, className='map-toggle')),
+                        html.Strong(id='slider-selection', className='slider-selection'),
+                        dcc.Slider(id='book-count-slider', min=0, max=1, step=1, value=0, marks={}, updatemode='drag'),
+                    ], className='chart-controls slider-controls'),
+                    graph('slider-chart'), html.P(id='slider-note', className='chart-note'),
+                ], className='panel'),
+                html.Details([
+                    html.Summary('08 / Multivariable exploration — PCA', id='pca-toggle', n_clicks=0),
+                    html.P('The original two-component projection is available here as an optional exploratory view. It summarises patterns across library resources and activity; it does not identify clusters or explain reading habits.', className='chart-note'),
+                    graph('pca-chart'), html.P(id='pca-note', className='chart-note'),
+                ], id='pca-panel', open=False, className='methods'),
+            ], id='collection-explorer'),
             html.Section([
                 html.Div([html.Div([html.Span('BEHIND THE VISUALS', className='eyebrow'), html.H2('Explore the records'), html.P(id='table-note')]),
                           html.Button('↓  Download filtered CSV', id='download-button', n_clicks=0, className='download-button')], className='section-heading'),
@@ -463,9 +571,9 @@ def selected_frame(ids):
     Output('stat-reporting', 'children'), Output('hint-reporting', 'children'),
     Output('collection-chart', 'figure'), Output('correlation-chart', 'figure'),
     Output('library-table', 'rowData'), Output('table-note', 'children'),
-    Input('filtered-ids', 'data'), Input('metric', 'value'),
+    Input('filtered-ids', 'data'), Input('metric', 'value'), Input('collection-statistic', 'value'),
 )
-def update_summaries(ids, metric):
+def update_summaries(ids, metric, statistic='median'):
     frame = selected_frame(ids)
     n = len(frame)
     reported = int(frame[metric].notna().sum())
@@ -476,7 +584,7 @@ def update_summaries(ids, metric):
         number(frame.books.median()) if n else '—', f'books · {frame.books.notna().sum():,} reported',
         number(frame[metric].median()) if n else '—', f'{metric} · {reported:,} reported',
         f'{reported / n:.0%}' if n else '—', f'{n - reported:,} missing {metric} values',
-        band_figure(frame, metric), heatmap_figure(frame), rows,
+        band_figure(frame, metric, statistic), heatmap_figure(frame), rows,
         f'{n:,} unique library records · Click a row for details; click column headings to sort.',
     )
 
@@ -498,10 +606,10 @@ def update_map(ids, color, extent, offline):
 @app.callback(
     Output('comparison-chart', 'figure'), Output('comparison-note', 'children'),
     Input('filtered-ids', 'data'), Input('compare-x', 'value'),
-    Input('metric', 'value'), Input('axis-scale', 'value'),
+    Input('metric', 'value'), Input('axis-scale', 'value'), Input('compare-y', 'value'),
 )
-def update_comparison(ids, x, metric, scale):
-    return scatter_figure(selected_frame(ids), x, metric, scale)
+def update_comparison(ids, x, metric, scale, y='activity'):
+    return scatter_figure(selected_frame(ids), x, metric if y == 'activity' else y, scale)
 
 
 @app.callback(
@@ -516,15 +624,54 @@ def update_area_coverage(ids, metric):
 
 
 @app.callback(
+    Output('book-count-slider', 'max'), Output('book-count-slider', 'value'),
+    Output('book-count-slider', 'marks'), Output('book-count-slider', 'disabled'),
+    Input('filtered-ids', 'data'),
+)
+def update_slider_options(ids):
+    counts = book_counts(selected_frame(ids))
+    if not len(counts):
+        return 1, 0, {}, True
+    indices = np.unique(np.linspace(0, len(counts) - 1, min(5, len(counts))).astype(int))
+    marks = {int(index): number(counts[index]) for index in indices}
+    return max(1, len(counts) - 1), len(counts) // 2, marks, len(counts) == 1
+
+
+@app.callback(
+    Output('slider-chart', 'figure'), Output('slider-selection', 'children'), Output('slider-note', 'children'),
+    Input('filtered-ids', 'data'), Input('book-count-slider', 'value'),
+    Input('slider-mode', 'value'), Input('metric', 'value'),
+)
+def update_slider_chart(ids, index, mode, metric):
+    return slider_figure(selected_frame(ids), index, mode, metric)
+
+
+@app.callback(Output('pca-panel', 'open'), Input('pca-toggle', 'n_clicks'))
+def toggle_pca(clicks):
+    return bool(clicks and clicks % 2)
+
+
+@app.callback(
+    Output('pca-chart', 'figure'), Output('pca-note', 'children'),
+    Input('filtered-ids', 'data'), Input('pca-toggle', 'n_clicks'),
+)
+def update_pca(ids, opened):
+    if not opened or opened % 2 == 0:
+        return empty_figure('Expand this panel to explore the projection.', 350), ''
+    return pca_figure(selected_frame(ids))
+
+
+@app.callback(
     Output('library-detail', 'children'),
     Input('library-map', 'clickData'), Input('comparison-chart', 'clickData'),
     Input('library-table', 'selectedRows'), Input('filtered-ids', 'data'),
+    Input('slider-chart', 'clickData'), Input('pca-chart', 'clickData'),
 )
-def update_detail(map_click, scatter_click, rows, ids):
+def update_detail(map_click, scatter_click, rows, ids, slider_click=None, pca_click=None):
     if ctx.triggered_id == 'filtered-ids':
         return detail_panel()
     library_id = None
-    click = map_click if ctx.triggered_id == 'library-map' else scatter_click if ctx.triggered_id == 'comparison-chart' else None
+    click = {'library-map': map_click, 'comparison-chart': scatter_click, 'slider-chart': slider_click, 'pca-chart': pca_click}.get(ctx.triggered_id)
     if click and click.get('points'):
         library_id = click['points'][0].get('customdata', [None])[0]
     elif ctx.triggered_id == 'library-table' and rows:
